@@ -190,7 +190,7 @@ public:
 class c_body_component : public c_entity_instance {
 public:
 	c_base_anim_graph* get_base_anim_graph_controller( ) {
-		return reinterpret_cast<c_base_anim_graph*>( std::uintptr_t( this ) + 0x460 );
+		return reinterpret_cast<c_base_anim_graph*>( std::uintptr_t( this ) + 0x490 );
 	}
 };
 
@@ -215,7 +215,7 @@ public:
 	}
 
 	bool is_weapon( ) {
-		return vmt::call_virtual<bool>( this, 156 );
+		return vmt::call_virtual<bool>( this, 158 );
 	}
 
 	bool is_view_model( ) {
@@ -223,7 +223,8 @@ public:
 	}
 
 	void set_model( const char* model_name ) {
-		static auto fn = reinterpret_cast<void* ( __fastcall* )( void*, const char* )>( g_opcodes->scan_absolute( g_modules->m_modules.client_dll.get_name( ), "E8 ? ? ? ? 41 8B 54 24 ? 49 8B 0C 24", 0x1 ) );
+		// xref: "Failed to create reference econ item for preview model (id %llu)"
+		static auto fn = reinterpret_cast<void* ( __fastcall* )( void*, const char* )>( g_opcodes->scan_absolute( g_modules->m_modules.client_dll.get_name( ), "E8 ? ? ? ? 44 88 A6", 0x1 ) );
 		fn( this, model_name );
 	}
 
@@ -342,9 +343,10 @@ public:
 
 	SCHEMA( m_burst_mode, bool, "C_CSWeaponBase", "m_bBurstMode" );
 	SCHEMA( m_burst_shots_remaining, int, "C_CSWeaponBaseGun", "m_iBurstShotsRemaining" );
+	SCHEMA( m_postpone_fire_ready_time, float, "C_CSWeaponBase", "m_flPostponeFireReadyTime");
 
 	c_cs_weapon_base_v_data* get_weapon_data( ) {
-		return *reinterpret_cast<c_cs_weapon_base_v_data**>( reinterpret_cast<uintptr_t>( this ) + 0x360 );
+		return *reinterpret_cast<c_cs_weapon_base_v_data**>( reinterpret_cast<uintptr_t>( this ) + 0x380 );
 	}
 
 	float get_max_speed( ) {
@@ -353,7 +355,7 @@ public:
 
 	float get_inaccuracy( ) {
 		using fn_get_inaccuracy_t = float( __fastcall* )( void* );
-		static fn_get_inaccuracy_t fn = reinterpret_cast<fn_get_inaccuracy_t>( g_opcodes->scan( g_modules->m_modules.client_dll.get_name( ), "48 89 5C 24 ? 55 56 57 48 81 EC ? ? ? ? 0F 29 B4 24" ) );
+		static fn_get_inaccuracy_t fn = reinterpret_cast<fn_get_inaccuracy_t>( g_opcodes->scan( g_modules->m_modules.client_dll.get_name( ), "48 89 5C 24 ? 55 56 57 48 81 EC ? ? ? ? 44 0F 29 84 24" ) );
 
 		return fn( this );
 	}
@@ -404,11 +406,11 @@ public:
 	SCHEMA( m_movement_services, c_player_movement_service*, "C_BasePlayerPawn", "m_pMovementServices" );
 	SCHEMA( m_camera_services, c_player_camera_service*, "C_BasePlayerPawn", "m_pCameraServices" );
 	SCHEMA( m_item_services, c_cs_player_item_service*, "C_BasePlayerPawn", "m_pItemServices" );
-	SCHEMA( m_scoped, c_cs_player_item_service*, "C_CSPlayerPawn", "m_bIsScoped" );
+	SCHEMA( m_scoped, bool, "C_CSPlayerPawn", "m_bIsScoped" );
 
 	vec3_t get_eye_pos( ) {
 		vec3_t view_;
-		vmt::call_virtual<void>( this, 166, &view_ );
+		vmt::call_virtual<void>( this, 169, &view_ );
 		return view_;
 	}
 
@@ -485,7 +487,15 @@ public:
 	}
 
 	int get_bone_index( const char* name ) {
-		static const auto fn = reinterpret_cast< int( __fastcall* )( void*, const char* ) >( g_opcodes->scan_absolute( g_modules->m_modules.client_dll.get_name( ), "E8 ? ? ? ? 33 DB 89 47 08", 0x1 ) );
+		static const auto fn = reinterpret_cast< int( __fastcall* )( void*, const char* ) >( g_opcodes->scan_absolute( g_modules->m_modules.client_dll.get_name( ), "E8 ? ? ? ? 85 C0 78 ? 4C 8D 4D", 0x1 ) );
 		return fn( this, name );
 	}
+};
+
+class c_glow_property {
+
+public:
+	SCHEMA(m_bGlowing, bool, "CGlowProperty", "m_bGlowing");
+	SCHEMA(m_GlowType, int, "CGlowProperty", "m_GlowType");
+	SCHEMA(m_glowColorOverride, c_byte_color, "CGlowProperty", "m_glowColorOverride");
 };
