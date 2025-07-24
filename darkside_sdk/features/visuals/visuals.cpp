@@ -2,6 +2,7 @@
 #include "../../render/render.hpp"
 #include "../../entity_system/entity.hpp"
 #include "../rage_bot/rage_bot.hpp"
+#include "../../valve/classes/game_enums.hpp"
 
 bbox_t c_visuals::calculate_bbox( c_cs_player_pawn* entity )
 {
@@ -111,8 +112,6 @@ void c_visuals::store_players( ) {
 			continue;
 		}
 
-		g_rage_bot->debug( player_pawn );
-
 		player_info_t& player_info = player_ptr->second;
 		player_info.m_valid = true;
 		player_info.m_handle = handle;
@@ -136,6 +135,81 @@ void c_visuals::store_players( ) {
 			}
 		}
 	}
+}
+
+void c_visuals::draw_skeleton(c_cs_player_pawn* player)
+{
+	if (!player || !player->is_player_pawn())
+		return;
+
+	auto scene_node = player->m_scene_node();
+	if (!scene_node)
+		return;
+
+	auto skeleton = scene_node->get_skeleton_instance();
+	if (!skeleton || !skeleton->m_bone_cache)
+		return;
+
+	auto& model_state = skeleton->m_model_state();
+	auto model = model_state.m_model();
+	if (!model)
+		return;
+
+	/* make sure bone matrices are up‑to‑date */
+	skeleton->calc_world_space_bones(skeleton->m_mask);
+
+	const int bone_count = skeleton->m_bone_count;
+	if (bone_count <= 0)
+		return;
+
+	/* -------------------------------------------------------------------- */
+	/* Step 1 + 2: build the “used” set                                     */
+	/* -------------------------------------------------------------------- */
+	std::vector<bool> used(bone_count, false);
+
+	for (int i = 0; i < bone_count; ++i)
+	{
+		if (model->get_bone_flags(i) & FLAG_HITBOX)
+		{
+			/* mark the bone itself … */
+			int cur = i;
+			while (cur >= 0 && cur < bone_count && !used[cur])
+			{
+				/* … and every parent on the way to the root.
+				   Once a bone is already marked we can stop climbing. */
+				used[cur] = true;
+				cur = model->get_bone_parent(cur);
+			}
+		}
+	}
+
+	/* -------------------------------------------------------------------- */
+	/* Step 3: draw only segments that belong to that compact skeleton      */
+	/* -------------------------------------------------------------------- */
+	for (int i = 0; i < bone_count; ++i)
+	{
+		const int parent = model->get_bone_parent(i);
+		if (parent < 0 || parent >= bone_count)
+			continue;
+
+		/* both ends must be part of the reduced skeleton                   */
+		if (!used[i] || !used[parent])
+			continue;
+
+		vec3_t p0 = skeleton->m_bone_cache[i].get_origin();
+		vec3_t p1 = skeleton->m_bone_cache[parent].get_origin();
+
+		vec3_t s0{}, s1{};
+		if (g_render->world_to_screen(p0, s0) &&
+			g_render->world_to_screen(p1, s1))
+		{
+			g_render->line(s0, s1, c_color{ 1.f, 1.f, 1.f, 1.f });
+		}
+	}
+}
+
+void c_visuals::glow( ) {
+
 }
 
 void c_visuals::handle_players( ) {
@@ -229,8 +303,17 @@ void c_visuals::handle_players( ) {
 					text_offset += 5.f;
 				}
 
-				g_render->text( vec3_t( bbox.x + bbox.width / 2.f, bbox.y + bbox.height + text_offset + 3.f ), main_color, font_flags_center | font_flags_outline,
-					g_render->fonts.onetap_pixel, player_info.m_weapon_name, g_render->fonts.onetap_pixel->FontSize );
+				g_render->text(vec3_t(bbox.x + bbox.width / 2.f, bbox.y + bbox.height + text_offset + 3.f), main_color, font_flags_center | font_flags_outline,
+					g_render->fonts.onetap_pixel, player_info.m_weapon_name, g_render->fonts.onetap_pixel->FontSize);
+			}
+
+			if (g_cfg->visuals.m_player_esp.m_skeleton) {
+				int current_index = player_info.m_handle == 0xffffffff ? 0x7fff : player_info.m_handle & 0x7fff;
+				auto entity = g_interfaces->m_entity_system->get_base_entity(current_index);
+				auto pawn = reinterpret_cast<c_cs_player_pawn*>(entity);
+
+				if (pawn)
+					draw_skeleton(pawn);
 			}
 		}
 	}
