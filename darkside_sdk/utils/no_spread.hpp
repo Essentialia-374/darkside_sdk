@@ -7,6 +7,13 @@ struct calc_spread_output_t {
     float y{};
 };
 
+struct no_spread_result {
+    bool bFound;
+    vec3_t angAdjusted;
+    int iFoundAfter;
+    int iSeed;
+};
+
 class c_no_spread {
 public:
     uint32_t compute_random_seed(vec3_t* view_angles, std::uint32_t tick_count)
