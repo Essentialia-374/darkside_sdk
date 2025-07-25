@@ -31,10 +31,26 @@ class c_visuals {
 	std::mutex m_player_mutex;
 	std::unordered_map<int, player_info_t> m_player_map;
 
-	void handle_players( );
+	void draw_skeleton(c_cs_player_pawn* player);
+	void draw_local_hat();
+	void store_dropped_weapons();
+	void handle_players();
+	struct dropped_weapon_info_t {
+		bool m_valid = false;
+
+		int m_handle;
+		vec3_t m_origin;
+
+		std::string m_weapon_name;
+	};
+
+	std::mutex m_weapon_mutex;
+	std::unordered_map<int, dropped_weapon_info_t> m_weapon_map;
+
+	void handle_dropped_weapons();
 public:
-	void store_players( );
-	void on_present( );
+	void store_players();
+	void on_present();
 };
 
 inline const auto g_visuals = std::make_unique<c_visuals>( );
