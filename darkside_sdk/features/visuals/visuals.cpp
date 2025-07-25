@@ -208,8 +208,125 @@ void c_visuals::draw_skeleton(c_cs_player_pawn* player)
 	}
 }
 
-void c_visuals::glow( ) {
+//-----------------------------------------------------------------------------
+// Draw a “halo” above the local‑player’s head, complete with a subtle
+// three‑layer glow.  The ring is built in world‑space so that it always stays
+// perfectly horizontal and keeps the correct perspective as you move around.
+//-----------------------------------------------------------------------------
+void c_visuals::draw_local_hat()
+{
+	/* make sure we are in a game and that the local pawn is alive */
+	if (!g_interfaces->m_engine->is_in_game())
+		return;
 
+	c_cs_player_pawn* local = g_ctx->m_local_pawn;
+	if (!local || !local->is_alive())
+		return;
+
+	/* -------------------------------------------------------------------- */
+	/* 1. world‑space parameters                                            */
+	/* -------------------------------------------------------------------- */
+	constexpr int   segments = 64;        // smoothness of the circle
+	constexpr float ring_r = 6.0f;      // base radius (world units)
+	constexpr float ring_z = 6.0f;      // vertical offset above the head
+
+	/* centre of the halo in world‑space */
+	const vec3_t head_pos = local->get_bone_position(BONE_HEAD);
+	const vec3_t ring_center = head_pos + vec3_t{ 0.f, 0.f, ring_z };
+
+	/* -------------------------------------------------------------------- */
+	/* 2. helper lambda: draw one ring                                      */
+	/* -------------------------------------------------------------------- */
+	auto draw_ring = [&](float radius, const c_color& col)
+		{
+			vec3_t prev_screen{};
+			bool   have_prev = false;
+
+			for (int i = 0; i <= segments; ++i)               // “<=” closes the loop
+			{
+				const float t = static_cast<float>(i) / segments;
+				const float ang = t * 6.28318530718f;         // 2 π
+
+				/* build point on the circle in world‑space */
+				vec3_t wp = ring_center + vec3_t{ std::cos(ang) * radius, std::sin(ang) * radius, 0.f };
+
+				vec3_t sp{};
+				if (g_render->world_to_screen(wp, sp))
+				{
+					if (have_prev)
+						g_render->line(prev_screen, sp, col);
+
+					prev_screen = sp;
+					have_prev = true;
+				}
+				else
+				{
+					/* lose continuity if point is off‑screen */
+					have_prev = false;
+				}
+			}
+		};
+
+	/* -------------------------------------------------------------------- */
+	/* 3. paint three concentric rings for a soft glow effect               */
+	/* -------------------------------------------------------------------- */
+	draw_ring(ring_r + 0.40f, { 0.25f, 0.65f, 1.0f, 0.15f });   // outer, faint
+	draw_ring(ring_r + 0.20f, { 0.25f, 0.65f, 1.0f, 0.35f });   // middle
+	draw_ring(ring_r, { 0.25f, 0.65f, 1.0f, 0.80f });   // inner, bright
+}
+
+void c_visuals::store_dropped_weapons() {
+	if (!g_interfaces->m_engine->is_in_game())
+		return;
+
+	const std::unique_lock<std::mutex> m(m_weapon_mutex);
+
+	std::erase_if(m_weapon_map, [](const auto& kv)
+		{
+			const auto& info = kv.second;
+
+			int current_index = info.m_handle == 0xffffffff ? 0x7fff : info.m_handle & 0x7fff;
+			c_base_entity* ent = g_interfaces->m_entity_system->get_base_entity(current_index);
+
+			if (ent)
+				return !ent->is_weapon() || ent->m_owner_entity().is_valid();
+
+			return true;
+		});
+
+	int highest = g_interfaces->m_entity_system->get_highest_entiy_index();
+	for (int i = 0; i <= highest; ++i) {
+		c_base_entity* ent = g_interfaces->m_entity_system->get_base_entity(i);
+		if (!ent || !ent->is_weapon())
+			continue;
+
+		if (ent->m_owner_entity().is_valid())
+			continue;
+
+		int handle = ent->get_handle().to_int();
+		auto it = m_weapon_map.find(handle);
+		if (it == m_weapon_map.end()) {
+			m_weapon_map.insert_or_assign(handle, dropped_weapon_info_t{});
+			it = m_weapon_map.find(handle);
+		}
+
+		dropped_weapon_info_t& info = it->second;
+		info.m_valid = true;
+		info.m_handle = handle;
+
+		if (ent->m_scene_node())
+			info.m_origin = ent->m_scene_node()->m_abs_origin();
+
+		c_base_player_weapon* weapon = reinterpret_cast<c_base_player_weapon*>(ent);
+		c_cs_weapon_base_v_data* data = weapon->get_weapon_data();
+		if (data) {
+			const char* name = data->m_name();
+			const char* start = strstr(name, "weapon_");
+			std::string weapon_name = start ? start + strlen("weapon_") : name;
+			std::transform(weapon_name.begin(), weapon_name.end(), weapon_name.begin(), ::toupper);
+			info.m_weapon_name = std::move(weapon_name);
+		}
+	}
 }
 
 void c_visuals::handle_players( ) {
@@ -319,6 +436,33 @@ void c_visuals::handle_players( ) {
 	}
 }
 
+
+void c_visuals::handle_dropped_weapons() {
+	const std::unique_lock<std::mutex> m(m_weapon_mutex);
+
+	for (auto it = m_weapon_map.begin(); it != m_weapon_map.end(); it = std::next(it)) {
+		dropped_weapon_info_t& info = it->second;
+		if (!info.m_valid)
+			continue;
+
+		vec3_t screen{};
+		if (!g_render->world_to_screen(info.m_origin, screen))
+			continue;
+
+		g_render->text(screen, c_color{ 1.f, 1.f, 1.f, 1.f }, font_flags_center | font_flags_dropshadow,
+			g_render->fonts.verdana_small, info.m_weapon_name,
+			g_render->fonts.verdana_small->FontSize);
+	}
+}
+
 void c_visuals::on_present( ) {
+	/* bail out early if we are not actually playing */
+	if (!g_interfaces->m_engine->is_in_game())
+		return;
+
+	store_dropped_weapons();
+
+	draw_local_hat( );
 	handle_players( );
+	handle_dropped_weapons();
 }
