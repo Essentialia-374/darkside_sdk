@@ -3,7 +3,34 @@
 #include "../movement/movement.hpp"
 #include "../../render/render.hpp"
 
-void c_rage_bot::store_records() {
+//                            _ooOoo_
+//                           o8888888o
+//                           88" . "88
+//                           (| -_- |)
+//                            O\ = /O
+//                        ____/`---'\____
+//                      .   ' \\| |// `.
+//                       / \\||| : |||// \
+//                     / _||||| -:- |||||- \
+//                       | | \\\ - /// | |
+//                     | \_| ''\---/'' | |
+//                      \ .-\__ `-` ___/-. /
+//                   ___`. .' /--.--\ `. . __
+//                ."" '< `.___\_<|>_/___.' >'"".
+//               | | : `- \`.;`\ _ /`;.`/ - ` : | |
+//                 \ \ `-. \_ __\ /__ _/ .-` / /
+//         ======`-.____`-.___\_____/___.-`____.-'======
+//                            `=---='
+//
+//         .............................................
+//                  佛祖保佑             永无BUG
+
+
+void c_rage_bot::store_records()
+{
+	/*-------------------------------------------------------------------------*/
+	/*  PRE‑CONDITIONS                                                         */
+	/*-------------------------------------------------------------------------*/
 	if (!g_interfaces->m_engine->is_in_game() || !g_interfaces->m_engine->is_connected())
 		return;
 
@@ -11,58 +38,64 @@ void c_rage_bot::store_records() {
 		return;
 
 	static auto sv_maxunlag = g_interfaces->m_var->get_by_name("sv_maxunlag");
-	const int max_ticks = TIME_TO_TICKS(sv_maxunlag->get_float());
+	const int   max_ticks = TIME_TO_TICKS(sv_maxunlag->get_float());
 
-	const auto& entity_list = g_entity_system->get("CCSPlayerController");
-	for (int i = 0; i < entity_list.size(); ++i) {
+	/*-------------------------------------------------------------------------*/
+	/*  ITERATE EVERY CONTROLLER IN THE GAME                                   */
+	/*-------------------------------------------------------------------------*/
+	const auto& controllers = g_entity_system->get("CCSPlayerController");
 
-		auto entity = entity_list[i];
-
-		auto player_controller = reinterpret_cast<c_cs_player_controller*>(entity);
-		if (!player_controller || player_controller == g_ctx->m_local_controller)
+	for (auto entity : controllers)
+	{
+		auto controller = reinterpret_cast<c_cs_player_controller*>(entity);
+		if (!controller || controller == g_ctx->m_local_controller)
 			continue;
 
-		auto handle = player_controller->get_handle().to_int();
+		const int handle = controller->get_handle().to_int();
 
-		if (!player_controller->m_pawn_is_alive()) {
-			auto player_iterator = m_lag_records.find(handle);
-			if (player_iterator != m_lag_records.end())
-				m_lag_records.erase(player_iterator);
-
-			continue;
-		}
-
-		auto player_pawn = reinterpret_cast<c_cs_player_pawn*>(g_interfaces->m_entity_system->get_base_entity(player_controller->m_pawn().get_entry_index()));
-		if (!player_pawn) {
-			auto player_iterator = m_lag_records.find(handle);
-			if (player_iterator != m_lag_records.end())
-				m_lag_records.erase(player_iterator);
-
+		/*---------------------------------------------------------------------*/
+		/*  CLEAN‑UP FOR DEAD / INVALID PLAYERS                                 */
+		/*---------------------------------------------------------------------*/
+		if (!controller->m_pawn_is_alive())
+		{
+			m_lag_records.erase(handle);
 			continue;
 		}
 
-		if (player_pawn->m_team_num() == g_ctx->m_local_pawn->m_team_num())
-			continue;
+		auto pawn = reinterpret_cast<c_cs_player_pawn*>(
+			g_interfaces->m_entity_system->get_base_entity(
+				controller->m_pawn().get_entry_index()));
 
-		if (player_pawn == g_ctx->m_local_pawn)
-			continue;
-
-		if (m_lag_records.find(handle) == m_lag_records.end()) {
-			m_lag_records.insert_or_assign(handle, std::deque<lag_record_t>{});
-
+		if (!pawn)
+		{
+			m_lag_records.erase(handle);
 			continue;
 		}
 
-		auto& records = m_lag_records[handle];
+		/*  Ignore team‑mates and the local player itself                       */
+		if (pawn == g_ctx->m_local_pawn ||
+			pawn->m_team_num() == g_ctx->m_local_pawn->m_team_num())
+			continue;
 
-		if (records.size() != max_ticks) {
-			records.clear();
-			records.resize(max_ticks);
-		}
+		/*---------------------------------------------------------------------*/
+		/*  FETCH / CREATE THE PLAYER‑SPECIFIC CIRCULAR BUFFER                  */
+		/*---------------------------------------------------------------------*/
+		auto& buffer = m_lag_records
+			.try_emplace(handle, util::circular_buffer<lag_record_t>(max_ticks))
+			.first->second;
 
-		auto& record = records.emplace_front(player_pawn);
-		if (records.size() > max_ticks - 1)
-			records.erase(records.end() - 1);
+		/*  Make sure capacity matches *sv_maxunlag* (server may change it)     */
+		if (buffer.max_size != static_cast<std::size_t>(max_ticks))
+			buffer.reserve(max_ticks);           // discards old data by design
+
+		/*---------------------------------------------------------------------*/
+		/*  INSERT THE NEWEST TICK, DISCARD OLDEST IF NECESSARY                 */
+		/*---------------------------------------------------------------------*/
+		if (buffer.exhausted())
+			buffer.pop_back();                   // make room for the new sample
+
+		if (auto* rec = buffer.push_front(); rec)    // cannot fail after pop
+			*rec = lag_record_t{ pawn };             // store() called via ctor
 	}
 }
 
@@ -104,50 +137,65 @@ void c_rage_bot::store_hitboxes() {
 	}
 }
 
-lag_record_t* c_rage_bot::select_record(int handle) {
-	if (!g_ctx->m_local_pawn->is_alive())
+lag_record_t* c_rage_bot::select_record(int handle)
+{
+	/*---------------------------------------------------------------------*/
+	/*  Sanity checks                                                       */
+	/*---------------------------------------------------------------------*/
+	if (!g_ctx->m_local_pawn || !g_ctx->m_local_pawn->is_alive())
 		return nullptr;
 
-	auto& records = m_lag_records[handle];
+	auto it_player = m_lag_records.find(handle);
+	if (it_player == m_lag_records.end())
+		return nullptr;
 
+	auto& records = it_player->second;
 	if (records.empty())
 		return nullptr;
 
+	/*---------------------------------------------------------------------*/
+	/*  Fast‑path: only one record                                          */
+	/*---------------------------------------------------------------------*/
+	if (records.size() == 1)
+		return &records.front();
+
+	/*---------------------------------------------------------------------*/
+	/*  Scan the circular buffer from newest → oldest                       */
+	/*---------------------------------------------------------------------*/
 	lag_record_t* best_record = nullptr;
-	lag_record_t* last_record = &records.front();
 
-	if (records.size() == 1u)
-		return last_record;
-
-	for (auto i = records.begin(); i != records.end(); i = std::next(i)) {
-		auto record = &*i;
+	for (auto it = records.begin(); it != records.end(); ++it)   // <‑‑ FIX: ++it instead of std::next(it)
+	{
+		lag_record_t* record = &*it;
 
 		if (!record->m_pawn || !record->is_valid())
 			continue;
 
-		if (!record || !record->is_valid())
-			continue;
-
-		if (!best_record) {
+		/*  First valid sample becomes baseline                               */
+		if (!best_record)
+		{
 			best_record = record;
-
 			continue;
 		}
 
-		if (record->m_throwing) {
+		/*  Prefer grenade‑throwing animations                                */
+		if (record->m_throwing)
+		{
 			best_record = record;
-
 			continue;
 		}
 
-		if ((record->m_pawn->m_flags() & FL_ONGROUND) != (record->m_pawn->m_flags() & FL_ONGROUND)) {
-			if ((record->m_pawn->m_flags() & FL_ONGROUND))
-				best_record = record;
-		}
+		/*  Prefer on‑ground state if current best is in air                  */
+		const bool cur_on_ground = (record->m_pawn->m_flags() & FL_ONGROUND);
+		const bool best_on_ground = (best_record->m_pawn->m_flags() & FL_ONGROUND);
+
+		if (cur_on_ground && !best_on_ground)
+			best_record = record;
 	}
 
 	return best_record;
 }
+
 
 void c_rage_bot::find_targets() {
 	if (!g_ctx->m_local_pawn->is_alive())
@@ -376,15 +424,11 @@ bool c_rage_bot::multi_points(lag_record_t* record, int hitbox, std::vector<aim_
 
 aim_point_t c_rage_bot::select_points(lag_record_t* record, float& damage)
 {
-	// --------------------------------------------------------------------------
 	// initial‑state defaults
-	// --------------------------------------------------------------------------
 	damage = 0.f;
 	aim_point_t best_point{ vec3_t(0.f, 0.f, 0.f), -1 /* invalid hitbox */ };
 
-	// --------------------------------------------------------------------------
 	// sanity checks – never assume any pointer is valid
-	// --------------------------------------------------------------------------
 	if (!record || !record->m_pawn)
 		return best_point;
 
@@ -410,9 +454,7 @@ aim_point_t c_rage_bot::select_points(lag_record_t* record, float& damage)
 	const vec3_t shoot_pos = local_data->m_eye_pos;
 	const bool   is_taser = weapon_data->m_weapon_type() == WEAPONTYPE_TASER;
 
-	// --------------------------------------------------------------------------
 	// iterate every requested hitbox → generate points → evaluate penetration
-	// --------------------------------------------------------------------------
 	float best_damage = -FLT_MAX;                  // allows 0‑damage points
 	bool  best_is_center = false;                  // tiebreaker: prefer centre
 
@@ -630,8 +672,67 @@ int c_rage_bot::calculate_hit_chance(c_cs_player_pawn* pawn, vec3_t angles, c_ba
 			hits++;
 	}
 
-	return static_cast<int>((static_cast<float>(hits / 570.f)) * 100.f);
+	const auto m_last_hit_chance = static_cast<int>((static_cast<float>(hits / 570.f)) * 100.f);
+	return m_last_hit_chance;
 }
+
+// note: unfinished
+no_spread_result c_rage_bot::get_no_spread(vec3_t& angle)
+{
+	no_spread_result result{};
+
+	auto* pawn = g_ctx->m_local_pawn;
+	if (!pawn || !pawn->is_alive())
+		return result;
+
+	auto* weapon = pawn->get_active_weapon();
+	if (!weapon)
+		return result;
+
+	auto* local_data = g_prediction->get_local_data();
+	if (!local_data)
+		return result;
+
+	//  ALWAYS bring the weapon state up‑to‑date first
+	weapon->update_accuracy_penality();      // <‑‑ mandatory!
+
+	// 	get the *real* values that the server will use
+	const float inaccuracy = local_data->m_inaccuracy;   // already jump‑aware
+	const float spread = local_data->m_spread;
+
+	const std::uint32_t tick = g_ctx->m_local_controller->m_tick_base();
+	const std::uint32_t seed0 = g_no_spread->compute_random_seed(&angle, tick);
+
+	// quick check: maybe this seed already gives zero spread 
+	if (g_no_spread->calculate_spread(seed0 + 1, inaccuracy, spread).x == 0.f &&
+		g_no_spread->calculate_spread(seed0 + 1, inaccuracy, spread).y == 0.f)
+	{
+		result = { true, angle, 0, static_cast<int>(seed0) };
+		return result;
+	}
+
+	//  brute‑force the self‑consistent solution
+	for (int i = 0; i < 720; ++i)                                 // 0 … 359.5°
+	{
+		vec3_t tmp = { angle.x + i * 0.5f, angle.y, 0.f };
+
+		const std::uint32_t seed = g_no_spread->compute_random_seed(&tmp, tick);
+		const auto vec = g_no_spread->calculate_spread(seed + 1, inaccuracy, spread);
+
+		/* convert (spread.x, spread.y) to <pitch, roll> compensation */
+		vec3_t adj = angle;
+		adj.x += rad2deg(std::atan(std::sqrt(vec.x * vec.x + vec.y * vec.y))); // pitch down
+		adj.z = -rad2deg(std::atan2(vec.x, vec.y));                            // roll
+
+		if (g_no_spread->compute_random_seed(&adj, tick) == seed)
+		{
+			result = { true, adj, i, static_cast<int>(seed) };
+			break;
+		}
+	}
+	return result;
+}
+
 
 void c_rage_bot::auto_pistol()
 {
@@ -696,120 +797,222 @@ void c_rage_bot::process_backtrack(lag_record_t* record) {
 }
 
 bool c_rage_bot::can_shoot(c_cs_player_pawn* pawn, c_base_player_weapon* active_weapon) {
-	return (active_weapon->m_clip1() > 0) && (active_weapon->m_next_primary_attack() <= g_ctx->m_local_controller->m_tick_base() + 2);
+	return (active_weapon->m_clip1() > 0) && (active_weapon->m_next_primary_attack() <= g_ctx->m_local_controller->m_tick_base());
 }
 
-void c_rage_bot::process_attack(c_user_cmd* user_cmd, vec3_t angle) {
-	user_cmd->pb.mutable_base()->mutable_viewangles()->set_x(179.f);
+static int find_entry_for_tick(const CSGOUserCmdPB& pb, int tick)
+{
+	for (int i = pb.input_history_size() - 1; i >= 0; --i)
+		if (pb.input_history(i).player_tick_count() == tick)
+			return i;
+	return 0;           // fallback – should not happen
+}
 
-	for (int i = 0; i < g_ctx->m_user_cmd->pb.input_history_size(); i++) {
-		auto container = g_ctx->m_user_cmd->pb.mutable_input_history(i);
-		if (container) {
-			container->set_player_tick_count(g_prediction->get_local_data()->m_shoot_tick);
+void c_rage_bot::process_attack(c_user_cmd* cmd, const vec3_t& desired_angles)
+{
+{
+		char buf[128];
+		std::snprintf(buf, sizeof(buf),
+			"[RB] process_attack → angles = (%.2f, %.2f, %.2f)",
+			desired_angles.x, desired_angles.y, desired_angles.z);
+		LOG_INFO(buf);
+	}
+
+	if (auto* base = cmd->pb.mutable_base())
+		if (auto* va = base->mutable_viewangles())
+		{
+			va->set_x(desired_angles.x);
+			va->set_y(desired_angles.y);
+			va->set_z(desired_angles.z);
+		}
+
+	const int   shootTick = g_prediction->get_local_data()->m_shoot_tick;
+	const float tickFrac = g_prediction->get_local_data()->m_player_tick_fraction;
+
+	{
+		char buf[128];
+		std::snprintf(buf, sizeof(buf),
+			"[RB] shootTick = %d    tickFrac = %.3f    history = %d",
+			shootTick, tickFrac, cmd->pb.input_history_size());
+		LOG_INFO(buf);
+	}
+
+	// 1) Update only the entry that already matches shootTick.
+	const int idx = find_entry_for_tick(cmd->pb, shootTick);
+	auto* entry = cmd->pb.mutable_input_history(idx);
+
+	for (int i = 0; i < cmd->pb.input_history_size(); ++i)
+	{
+		auto* entry = cmd->pb.mutable_input_history(i);
+		if (!entry)
+			continue;
+
+		{
+			char buf[128];
+			std::snprintf(buf, sizeof(buf),
+				"[RB]  ▸ BEFORE  id=%02d  pTick=%d rTick=%d",
+				i, entry->player_tick_count(), entry->render_tick_count());
+			LOG_INFO(buf);
+		}
+
+		entry->set_player_tick_count(shootTick);
+		entry->set_render_tick_count(shootTick);
+		entry->set_player_tick_fraction(tickFrac);
+		entry->set_render_tick_fraction(tickFrac);
+
+		{
+			char buf[128];
+			std::snprintf(buf, sizeof(buf),
+				"[RB]  ▸ AFTER   id=%02d  pTick=%d rTick=%d",
+				i, entry->player_tick_count(), entry->render_tick_count());
+			LOG_INFO(buf);
 		}
 	}
 
-	user_cmd->pb.set_attack3_start_history_index(0);
-	user_cmd->pb.set_attack1_start_history_index(0);
-	process_backtrack(m_best_target->m_lag_record);
 
+	// 2) Point attack‑index at that entry.
+	cmd->pb.set_attack1_start_history_index(idx);
+	cmd->pb.set_attack2_start_history_index(-1);
+	cmd->pb.set_attack3_start_history_index(-1);
+
+	{
+		char buf[96];
+		std::snprintf(buf, sizeof(buf),
+			"[RB] attackIdx  a1=%d  a2=%d  a3=%d",
+			cmd->pb.attack1_start_history_index(),
+			cmd->pb.attack2_start_history_index(),
+			cmd->pb.attack3_start_history_index());
+		LOG_INFO(buf);
+	}
+
+
+	// 3) Sub‑tick move step is still required.
 	if (g_cfg->rage_bot.m_auto_fire)
-		user_cmd->m_button_state.m_button_state |= IN_ATTACK;
+	{
+		auto* step = g_protobuf->add_subtick_move_step(cmd);
+		if (step) {
+			step->set_button(IN_ATTACK);
+			step->set_pressed(true);
+			step->set_when(tickFrac);
+
+			char buf[128];
+			std::snprintf(buf, sizeof(buf),
+				"[RB] subtick step added  when=%.3f", tickFrac);
+			LOG_INFO(buf);
+		}
+		else {
+			LOG_INFO("[RB] ERROR: add_subtick_move_step → nullptr");
+		}
+		cmd->m_button_state.m_button_state |= IN_ATTACK;
+	}
+
+	process_backtrack(m_best_target->m_lag_record);
+	LOG_INFO("[RB] backtrack processed");
 }
 
-void c_rage_bot::on_create_move() {
-	if (!g_cfg->rage_bot.m_enabled)
+
+void c_rage_bot::on_create_move()
+{
+	if (!g_cfg->rage_bot.m_enabled ||                       // feature disabled in menu
+		!g_interfaces->m_engine->is_in_game())              // not in a live match
 		return;
 
-	if (!g_interfaces->m_engine->is_in_game())
-		return;
+	/* clear‑per‑tick state */
+	m_hitboxes.clear();
+	if (m_best_target) m_best_target->reset();
 
-	if (!m_hitboxes.empty())
-		m_hitboxes.clear();
-
-	if (m_best_target)
-		m_best_target->reset();
-
+	/* shorthands */
 	c_user_cmd* user_cmd = g_ctx->m_user_cmd;
+	c_cs_player_pawn* local_pawn = g_ctx->m_local_pawn;
+	c_base_player_weapon* active_weapon = local_pawn ? local_pawn->get_active_weapon() : nullptr;
+	c_cs_weapon_base_v_data* weapon_data =
+		active_weapon ? active_weapon->get_weapon_data() : nullptr;
 
-	if (!user_cmd)
+	/* more guards – bail if anything fundamental is missing */
+	if (!user_cmd || !local_pawn || !local_pawn->is_alive() ||
+		!active_weapon || !weapon_data ||
+		weapon_data->m_weapon_type() == WEAPONTYPE_KNIFE ||
+		weapon_data->m_weapon_type() == WEAPONTYPE_GRENADE)
 		return;
 
-	c_cs_player_pawn* local_player = g_ctx->m_local_pawn;
 
-	if (!local_player || !local_player->is_alive())
-		return;
-
-	c_base_player_weapon* active_weapon = local_player->get_active_weapon();
-
-	if (!active_weapon)
-		return;
-
-	c_cs_weapon_base_v_data* weapon_data = active_weapon->get_weapon_data();
-
-	if (!weapon_data
-		|| weapon_data->m_weapon_type() == WEAPONTYPE_KNIFE
-		|| weapon_data->m_weapon_type() == WEAPONTYPE_GRENADE)
-		return;
+	static auto set_random_seed = [](c_user_cmd* cmd, std::uint32_t seed)
+		{
+			cmd->random_seed = seed;                         // client side
+			if (auto* base = cmd->pb.mutable_base())           // server copy
+				base->set_random_seed(seed);
+		};
 
 	auto_pistol();
 	store_hitboxes();
-
-	if (m_hitboxes.empty())
+	if (m_hitboxes.empty()) 
 		return;
 
 	find_targets();
-
 	select_target();
-
-	if (!m_best_target || !m_best_target->m_best_point)
+	if (!m_best_target || !m_best_target->m_best_point) 
 		return;
 
-	auto local_data = g_prediction->get_local_data();
-
-	if (!local_data)
+	auto* local_data = g_prediction->get_local_data();
+	if (!local_data || !can_shoot(local_pawn, active_weapon))
 		return;
 
-	if (!can_shoot(local_player, active_weapon))
-		return;
+	const bool convar_no_spread =
+		g_interfaces->m_var->get_by_name("weapon_accuracy_nospread")->get_bool();
+	const bool want_no_spread = g_cfg->rage_bot.m_no_spread || convar_no_spread;
 
-	bool no_spread = g_interfaces->m_var->get_by_name(xorstr_("weapon_accuracy_nospread"))->get_bool();
+	vec3_t base_angle = g_math->aim_direction(
+		local_data->m_eye_pos,
+		m_best_target->m_best_point->m_point)
+		- get_removed_aim_punch_angle(local_pawn);
 
-	if ((weapon_data->m_weapon_type() == WEAPONTYPE_SNIPER_RIFLE)
-		&& !(user_cmd->m_button_state.m_button_state & IN_ZOOM)
-		&& !local_player->m_scoped()
-		&& (local_player->m_flags() & FL_ONGROUND)
-		&& !no_spread) {
-		user_cmd->m_button_state.m_button_state |= IN_ATTACK2;
-	}
+	bool         has_no_spread = false;
+	std::uint32_t solved_seed = 0;
 
-	g_movement->auto_stop(user_cmd, local_player, active_weapon, no_spread);
-
-	bool is_taser = weapon_data->m_weapon_type() == WEAPONTYPE_TASER;
-
-	m_best_target->m_lag_record->apply(m_best_target->m_pawn);
-
-	vec3_t angle = g_math->aim_direction(local_data->m_eye_pos, m_best_target->m_best_point->m_point);
-
-	vec3_t best_angle = angle - get_removed_aim_punch_angle(local_player);
-
-	int hit_chance = calculate_hit_chance(m_best_target->m_pawn, best_angle, active_weapon, weapon_data, no_spread);
-
-	if (hit_chance >= (is_taser ? 70 : g_cfg->rage_bot.m_hit_chance)) {
-		for (int i = 0; i < user_cmd->pb.input_history_size(); i++) {
-			auto tick = user_cmd->pb.mutable_input_history(i);
-			if (tick) {
-				tick->mutable_view_angles()->set_x(best_angle.x);
-				tick->mutable_view_angles()->set_y(best_angle.y);
-				tick->mutable_view_angles()->set_z(best_angle.z);
-			}
+	if (want_no_spread)
+	{
+		const no_spread_result ns = get_no_spread(base_angle);
+		if (ns.bFound)
+		{
+			base_angle = ns.angAdjusted;    // compensated view
+			solved_seed = ns.iSeed;          // seed that eliminates spread
+			has_no_spread = true;
+			set_random_seed(user_cmd, solved_seed);
 		}
-
-		if (!g_cfg->rage_bot.m_silent)
-			g_interfaces->m_csgo_input->set_view_angles(best_angle);
-
-		process_attack(user_cmd, best_angle);
 	}
 
+	g_movement->auto_stop(user_cmd, local_pawn, active_weapon, has_no_spread);
+
+	const bool is_taser = weapon_data->m_weapon_type() == WEAPONTYPE_TASER;
+	const int  hitchance = calculate_hit_chance(
+		m_best_target->m_pawn,
+		base_angle,
+		active_weapon,
+		weapon_data,
+		has_no_spread);
+
+	/* required hit‑chance threshold */
+	const int  needed_hc = is_taser ? 70 : g_cfg->rage_bot.m_hit_chance;
+	if (hitchance < needed_hc)                // too risky → skip this tick
+	{
+		m_best_target->m_lag_record->reset(m_best_target->m_pawn);
+		return;
+	}
+
+	for (int i = 0; i < user_cmd->pb.input_history_size(); ++i)
+	{
+		auto* tick = user_cmd->pb.mutable_input_history(i);
+		if (!tick) 
+			continue;
+
+		tick->mutable_view_angles()->set_x(base_angle.x);
+		tick->mutable_view_angles()->set_y(base_angle.y);
+		tick->mutable_view_angles()->set_z(base_angle.z);
+	}
+
+	if (!g_cfg->rage_bot.m_silent)
+		g_interfaces->m_csgo_input->set_view_angles(base_angle);
+
+	process_attack(user_cmd, base_angle);
 	m_best_target->m_lag_record->reset(m_best_target->m_pawn);
 }
